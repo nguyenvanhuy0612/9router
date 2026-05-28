@@ -425,18 +425,15 @@ async function scheduleMitmRestart(apiKey) {
       return;
     }
     const password = getCachedPassword() || await loadEncryptedPassword();
-    // Patch G: disable guard when running as root in Docker
+    // Patch G: disable "no cached password" guard when running as root in Docker
     if (!password && !IS_WIN) {
       const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
-      if (isRoot) {
-        log("Running as root (Docker) — skipping sudo password check for auto-restart");
-      } else {
+      if (!isRoot) {
         err("No cached password, cannot auto-restart");
         mitmIsRestarting = false;
         return;
       }
-      mitmIsRestarting = false;
-      return;
+      log("Running as root (Docker) — skipping sudo password check for auto-restart");
     }
     await startServer(apiKey, password);
     log("🔄 Restarted successfully");

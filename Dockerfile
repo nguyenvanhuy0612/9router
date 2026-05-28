@@ -1,33 +1,48 @@
-# 9router — build from source + apply patches
-# Multi-stage: build → patch middleware → final image
-
-FROM node:22-slim AS builder
+# syntax=docker/dockerfile:1.7
+ARG NODE_IMAGE=node:22-alpine
+FROM ${NODE_IMAGE} AS base
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    sudo ca-certificates lsof git \
-    && rm -rf /var/lib/apt/lists/*
-COPY package.json package-lock.json* ./
-RUN npm install
-COPY . .
-# Source patches A/1/4/G already applied in source files
+
+FROM base AS builder
+
+RUN apk --no-cache upgrade && apk --no-cache add python3 make g++ linux-headers
+
+COPY package.json ./
+RUN --mount=type=cache,target=/root/.npm \
+  npm install
+
+COPY . ./
+ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
-# ── Stage 2: patch middleware then package ──
-FROM node:22-slim AS patched
+FROM ${NODE_IMAGE} AS runner
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    sudo ca-certificates lsof \
-    && rm -rf /var/lib/apt/lists/*
 
-# Copy built output
-COPY --from=builder /app ./
+LABEL org.opencontainers.image.title="9router"
 
-# Patch I — middleware: find + patch dynamically
-RUN MW=$(find . -name "middleware.js" 2>/dev/null | head -1) && \
-    echo "Found middleware: $MW" && \
-    sed -i 's|"/api/cli-tools/antigravity-mitm",||' "$MW" && \
-    ! grep -q '/api/cli-tools/antigravity-mitm' "$MW" && \
-    echo "Patch I ✓" || (echo "Patch I failed" && exit 1)
+ENV NODE_ENV=production
+ENV PORT=20128
+ENV HOSTNAME=0.0.0.0
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV DATA_DIR=/app/data
+
+# Runtime: sudo (MITM DNS commands), lsof (port checks)
+RUN apk --no-cache upgrade && apk --no-cache add sudo lsof
+
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/open-sse ./open-sse
+# Next file tracing can omit sibling files; MITM runs server.js as a separate process.
+COPY --from=builder /app/src/mitm ./src/mitm
+# dnsConfig.js requires ../../shared/constants/mitmToolHosts.js
+COPY --from=builder /app/src/shared ./src/shared
+# Standalone node_modules may omit deps only required by the MITM child process.
+COPY --from=builder /app/node_modules/node-forge ./node_modules/node-forge
+# Ensure `next` is available at runtime in case tracing did not include it.
+COPY --from=builder /app/node_modules/next ./node_modules/next
 
 EXPOSE 20128 443
-CMD ["node", "node_modules/next/dist/bin/next", "start"]
+
+# Run as root: required for port 443 binding + Patch G root detection
+CMD ["node", "--max-old-space-size=6144", "server.js"]
