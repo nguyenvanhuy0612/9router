@@ -1,52 +1,33 @@
-# syntax=docker/dockerfile:1.7
-ARG NODE_IMAGE=node:22-alpine
-FROM ${NODE_IMAGE} AS base
+# 9router — build from source + apply patches
+# Multi-stage: build → patch middleware → final image
+
+FROM node:22-slim AS builder
 WORKDIR /app
-
-FROM base AS builder
-
-RUN apk --no-cache upgrade && apk --no-cache add python3 make g++ linux-headers
-
-COPY package.json ./
-RUN --mount=type=cache,target=/root/.npm \
-  npm install
-
-COPY . ./
-ENV NEXT_TELEMETRY_DISABLED=1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    sudo ca-certificates lsof git \
+    && rm -rf /var/lib/apt/lists/*
+COPY package.json package-lock.json* ./
+RUN npm install
+COPY . .
+# Source patches A/1/4/G already applied in source files
 RUN npm run build
 
-FROM ${NODE_IMAGE} AS runner
+# ── Stage 2: patch middleware then package ──
+FROM node:22-slim AS patched
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    sudo ca-certificates lsof \
+    && rm -rf /var/lib/apt/lists/*
 
-LABEL org.opencontainers.image.title="9router"
+# Copy built output
+COPY --from=builder /app ./
 
-ENV NODE_ENV=production
-ENV PORT=20128
-ENV HOSTNAME=0.0.0.0
-ENV NEXT_TELEMETRY_DISABLED=1
-ENV DATA_DIR=/app/data
+# Patch I — middleware: find + patch dynamically
+RUN MW=$(find . -name "middleware.js" 2>/dev/null | head -1) && \
+    echo "Found middleware: $MW" && \
+    sed -i 's|"/api/cli-tools/antigravity-mitm",||' "$MW" && \
+    ! grep -q '/api/cli-tools/antigravity-mitm' "$MW" && \
+    echo "Patch I ✓" || (echo "Patch I failed" && exit 1)
 
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/open-sse ./open-sse
-# Next file tracing can omit sibling files; MITM runs server.js as a separate process.
-COPY --from=builder /app/src/mitm ./src/mitm
-# Standalone node_modules may omit deps only required by the MITM child process.
-COPY --from=builder /app/node_modules/node-forge ./node_modules/node-forge
-# Ensure `next` is available at runtime in case tracing did not include it.
-COPY --from=builder /app/node_modules/next ./node_modules/next
-
-RUN mkdir -p /app/data && chown -R node:node /app && \
-  mkdir -p /app/data-home && chown node:node /app/data-home && \
-  ln -sf /app/data-home /root/.9router 2>/dev/null || true
-
-# Fix permissions at runtime (handles mounted volumes)
-RUN apk --no-cache upgrade && apk --no-cache add su-exec && \
-  printf '#!/bin/sh\nchown -R node:node /app/data /app/data-home 2>/dev/null\nexec su-exec node "$@"\n' > /entrypoint.sh && \
-  chmod +x /entrypoint.sh
-
-EXPOSE 20128
-
-ENTRYPOINT ["/entrypoint.sh"]
-CMD ["node", "server.js"]
+EXPOSE 20128 443
+CMD ["node", "node_modules/next/dist/bin/next", "start"]

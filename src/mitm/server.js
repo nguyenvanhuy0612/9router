@@ -72,6 +72,9 @@ const cachedTargetIPs = {};
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 async function resolveTargetIP(hostname) {
+  // Patch 1: short-circuit IP literals + localhost before DNS
+  if (require("net").isIP(hostname)) return hostname;
+  if (hostname === "localhost") return "127.0.0.1";
   const cached = cachedTargetIPs[hostname];
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.ip;
   const resolver = new dns.Resolver();
@@ -315,6 +318,13 @@ const server = https.createServer(sslOptions, async (req, res) => {
       return passthrough(req, res, bodyBuffer);
     }
 
+    // Patch 4: block IP-direct / localhost hits with 404 (prevent scanner self-loop)
+    const hostHeader = (req.headers.host || "").split(":")[0];
+    if (!hostHeader || require("net").isIP(hostHeader) || hostHeader === "localhost") {
+      res.writeHead(404);
+      res.end("Not Found");
+      return;
+    }
     const tool = getToolForHost(req.headers.host);
     if (!tool) return passthrough(req, res, bodyBuffer);
 

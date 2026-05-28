@@ -165,8 +165,8 @@ export async function PATCH(request) {
     const { tool, action, sudoPassword } = await request.json();
     const pwd = getPassword(sudoPassword) || await loadEncryptedPassword() || "";
 
-    if (!tool || !action) {
-      return NextResponse.json({ error: "tool and action required" }, { status: 400 });
+    if (!action) {
+      return NextResponse.json({ error: "action required" }, { status: 400 });
     }
     if (requiresSudoPassword(pwd)) {
       return NextResponse.json({ error: "Missing sudoPassword" }, { status: 400 });
@@ -183,6 +183,8 @@ export async function PATCH(request) {
     } else if (action === "disable") {
       await disableToolDNS(tool, pwd);
     } else if (action === "trust-cert") {
+      // trust-cert: tool param optional (Patch A)
+      const needsTool = false;
       await trustCert(pwd);
       if (!isWin && sudoPassword) setCachedPassword(sudoPassword);
       const status = await getMitmStatus();
